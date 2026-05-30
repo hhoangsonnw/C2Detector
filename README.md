@@ -20,6 +20,23 @@ plus CSV artifacts.
 > packets, decrypt matching payloads, and automatically extract encrypted
 > artifacts such as embedded executables, archives, documents, and PDFs.
 
+
+---
+
+## Limitations
+
+- **Framework Coverage**: Only Havoc C2 framework is currently supported. Detection
+  for other C2 frameworks (Cobalt Strike, Sliver, etc.) is not yet implemented.
+- **Protocol Support**: Limited to HTTP/TLS traffic. Other protocols (DNS, HTTPS with
+  encrypted payloads) have limited or no detection capabilities.
+- **Decryption**: Automatic decryption only works for Havoc C2 traffic. Other encrypted
+  protocols cannot be decrypted without manual key provision.
+- **Artifact Extraction**: Automated extraction is limited to payloads within Havoc C2
+  traffic. Detection of embedded objects in other frameworks requires manual analysis.
+- **PCAP Size**: Performance may degrade with very large PCAP files (>1GB).
+- **Real-time Analysis**: This tool is designed for offline PCAP analysis and does not
+  support live packet capture analysis.
+
 ---
 
 ## Build
