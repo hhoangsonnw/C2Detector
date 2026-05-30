@@ -31,9 +31,6 @@ plus CSV artifacts.
   encrypted payloads) have limited or no detection capabilities.
 - **Decryption**: Automatic decryption only works for Havoc C2 traffic. Other encrypted
   protocols cannot be decrypted without manual key provision.
-- **Artifact Extraction**: Automated extraction is limited to payloads within Havoc C2
-  traffic. Detection of embedded objects in other frameworks requires manual analysis.
-- **PCAP Size**: Performance may degrade with very large PCAP files (>1GB).
 - **Real-time Analysis**: This tool is designed for offline PCAP analysis and does not
   support live packet capture analysis.
 
