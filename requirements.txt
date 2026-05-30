@@ -1,0 +1,3 @@
+# Portable Havoc AES-CTR decrypt backend.
+# C2Detector can also fall back to the local openssl command when available.
+pycryptodome
