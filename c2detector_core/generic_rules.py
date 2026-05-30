@@ -1,6 +1,6 @@
 """Framework-neutral C2 behavior heuristics."""
 
-from c2detector_core.config import DEFAULT_ATTACK_MAP, AnalysisConfig
+from c2detector_core.config import AnalysisConfig
 from c2detector_core.engine import DetectionRule
 from c2detector_core.models import AnalysisResult, Finding, HTTPRequest, SuspiciousFlow, TLSClientHello
 from c2detector_core.utils import (
@@ -97,7 +97,6 @@ class GenericHTTPBeaconRule(DetectionRule):
                     first_seen=requests[0].timestamp,
                     last_seen=requests[-1].timestamp,
                     evidence=evidence,
-                    attack=DEFAULT_ATTACK_MAP,
                     suspicious_flows=[flow],
                 )
             )
@@ -165,7 +164,6 @@ class GenericTLSBeaconRule(DetectionRule):
                     first_seen=hellos[0].timestamp,
                     last_seen=hellos[-1].timestamp,
                     evidence=evidence,
-                    attack=["T1071.001 Web Protocols"],
                     suspicious_flows=[flow],
                 )
             )

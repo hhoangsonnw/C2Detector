@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import csv
 import hashlib
 import json
@@ -106,12 +108,17 @@ def confidence_style(confidence: str) -> str:
 class ReportWriter:
     def write(self, result: AnalysisResult) -> None:
         result.output_dir.mkdir(parents=True, exist_ok=True)
-        object_dir = result.output_dir / "extracted_http_objects"
-        if object_dir.exists():
-            shutil.rmtree(object_dir)
-        object_dir.mkdir(parents=True, exist_ok=True)
+        for legacy_dir in ("extracted_http_objects", "havoc_decrypted", "nimplant_decrypted"):
+            path = result.output_dir / legacy_dir
+            if path.exists():
+                shutil.rmtree(path)
+        if not result.plugin_artifacts.get("artifact_index_written"):
+            (result.output_dir / "index.csv").unlink(missing_ok=True)
+        if not result.plugin_artifacts.get("carved_artifacts_written"):
+            path = result.output_dir / "carved_artifacts"
+            if path.exists():
+                shutil.rmtree(path)
 
-        self._write_http_objects(result, object_dir)
         self._write_timeline(result)
         self._write_suspicious_flows(result)
         self._write_report(result)
@@ -317,8 +324,6 @@ class ReportWriter:
                 ]
             )
             lines.extend(f"- {item}" for item in finding.evidence)
-            lines.extend(["", "ATT&CK mapping:"])
-            lines.extend(f"- {item}" for item in finding.attack)
             lines.append("")
 
         for section in result.plugin_artifacts.get("report_sections", []):
@@ -330,8 +335,8 @@ class ReportWriter:
                 "",
                 "- `timeline.csv`: normalized HTTP, TLS, and finding timeline",
                 "- `suspicious_flows.csv`: one row per suspicious flow or endpoint pattern",
-                "- `extracted_http_objects/`: curated HTTP artifacts with recognized headers or useful text",
-                "- `havoc_decrypted/`: Havoc AES-CTR decrypt attempts when Havoc sessions are found",
+                "- `index.csv`: carved artifact index when framework plugins recover files",
+                "- `carved_artifacts/`: decoded screenshots, transfers, and other recovered files",
                 "",
                 "## Notes and Limitations",
                 "",
@@ -379,7 +384,15 @@ def triage_http_object(body: bytes, content_type: str) -> dict[str, str]:
             "status": "filtered",
             "extension": "",
             "artifact_type": "Havoc protocol body",
-            "reason": "protocol body is handled by havoc_decrypted artifacts",
+            "reason": "protocol body is handled by framework-specific artifact carving",
+        }
+
+    if looks_like_nimplant_wire_body(body):
+        return {
+            "status": "filtered",
+            "extension": "",
+            "artifact_type": "Nimplant protocol body",
+            "reason": "protocol body is handled by framework-specific artifact carving",
         }
 
     if len(body) < MIN_TEXT_OBJECT_BYTES:
@@ -464,6 +477,34 @@ def looks_like_havoc_wire_body(body: bytes) -> bool:
     return first_field in {0, 1, 99} or second_field in {1, 99}
 
 
+def looks_like_nimplant_wire_body(body: bytes) -> bool:
+    try:
+        obj = json.loads(body.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(obj, dict):
+        return False
+    if isinstance(obj.get("id"), str) and isinstance(obj.get("k"), str):
+        return True
+    keys = set(obj)
+    if keys == {"data"} and isinstance(obj.get("data"), str):
+        return looks_like_base64_iv_blob(obj["data"])
+    if keys == {"t"} and isinstance(obj.get("t"), str):
+        return looks_like_base64_iv_blob(obj["t"])
+    return False
+
+
+def looks_like_base64_iv_blob(value: str) -> bool:
+    normalized = "".join(value.split())
+    if len(normalized) < 24:
+        return False
+    try:
+        decoded = base64.b64decode(normalized + "=" * ((-len(normalized)) % 4), validate=False)
+    except (binascii.Error, ValueError):
+        return False
+    return len(decoded) > 16
+
+
 def print_console_summary(result: AnalysisResult) -> None:
     if not result.findings:
         print(f"{success('[-]')} No C2-like patterns found by current rules.")
@@ -471,9 +512,12 @@ def print_console_summary(result: AnalysisResult) -> None:
         return
 
     printed_havoc = print_havoc_console_summary(result)
+    printed_nimplant = print_nimplant_console_summary(result)
 
     for finding in result.findings:
         if printed_havoc and finding.metadata.get("plugin") == "havoc":
+            continue
+        if printed_nimplant and finding.metadata.get("plugin") == "nimplant":
             continue
         print(f"{danger('[+]')} Suspicious host: {danger(finding.suspicious_host)}")
         print(f"{danger('[+]')} Possible C2: {danger(finding.possible_c2)}")
@@ -481,9 +525,6 @@ def print_console_summary(result: AnalysisResult) -> None:
         print(f"{info('[+]')} Evidence:")
         for evidence in finding.evidence:
             print(f"    - {evidence}")
-        print(f"{info('[+]')} ATT&CK:")
-        for attack in finding.attack:
-            print(f"    - {colorize(attack, 'magenta')}")
     print(f"{success('[+]')} Report written: {info(result.output_dir / 'report.md')}")
     print(f"{success('[+]')} Timeline written: {info(result.output_dir / 'timeline.csv')}")
     print(
@@ -566,10 +607,10 @@ def print_decrypted_attempt(result: AnalysisResult, attempt) -> None:
     if attempt.filename:
         print(
             f"      {success('[-]')} Saved: "
-            f"{info(result.output_dir / 'havoc_decrypted' / attempt.filename)}"
+            f"{info(result.output_dir / attempt.filename)}"
         )
     if getattr(attempt, "artifact_filename", ""):
-        artifact_path = result.output_dir / "havoc_decrypted" / "carved_artifacts" / attempt.artifact_filename
+        artifact_path = result.output_dir / "carved_artifacts" / attempt.artifact_filename
         print(
             f"      {danger('[!] Found artifact:')} {danger(artifact_path)} "
             f"{warning(f'({attempt.artifact_type}, offset {attempt.artifact_offset})')}"
@@ -580,16 +621,16 @@ def print_decrypted_attempt(result: AnalysisResult, attempt) -> None:
 
 
 def read_decrypted_text(result: AnalysisResult, attempt) -> str:
+    preview = getattr(attempt, "preview", "")
+    if preview:
+        return preview
     if not attempt.filename:
-        return "<no decrypted file was written>"
-    path = result.output_dir / "havoc_decrypted" / attempt.filename
+        return "<no decrypted preview was available>"
+    path = result.output_dir / attempt.filename
     try:
         data = path.read_bytes()
     except OSError as exc:
         return f"<unable to read decrypted payload: {exc}>"
-    preview = getattr(attempt, "preview", "")
-    if preview:
-        return preview
     truncated = len(data) > MAX_CONSOLE_DECRYPT_BYTES
     if truncated:
         data = data[:MAX_CONSOLE_DECRYPT_BYTES]
@@ -597,6 +638,103 @@ def read_decrypted_text(result: AnalysisResult, attempt) -> str:
     if truncated:
         text += (
             f"\n\n[... truncated console output at {MAX_CONSOLE_DECRYPT_BYTES} bytes; "
-            "full plaintext is saved in havoc_decrypted/ ...]"
+            "additional plaintext omitted from console output ...]"
         )
     return text
+
+
+def print_nimplant_console_summary(result: AnalysisResult) -> bool:
+    sessions = result.plugin_artifacts.get("nimplant_sessions", [])
+    if not sessions:
+        return False
+
+    attempts = result.plugin_artifacts.get("nimplant_decryption_attempts", [])
+    for session in sessions:
+        session_attempts = [
+            attempt
+            for attempt in attempts
+            if getattr(attempt, "implant_id", "") == session.implant_id
+        ]
+        backend = next(
+            (
+                getattr(attempt, "backend", "")
+                for attempt in session_attempts
+                if getattr(attempt, "backend", "") not in {"", "none"}
+            ),
+            getattr(session, "key_recovery_backend", "") or "none",
+        )
+        c2_address = nimplant_c2_address(session)
+
+        print(f"{danger('[+] Found Nimplant C2')}")
+        print(f"  {muted('[-]')} Implant ID: {session.implant_id}")
+        print(f"  {muted('[-]')} C2 Address: {danger(c2_address)}")
+        print(f"  {muted('[-]')} Confidence: {confidence_style('High' if session.aes_key_hex else 'Medium')}")
+        print(f"  {muted('[-]')} Obfuscated k: {info(session.obfuscated_key_b64)}")
+        if session.aes_key_hex:
+            print(f"  {success('[+]')} Recovered AES Key")
+            print(f"    [-] Key: {session.aes_key_hex}")
+            if getattr(session, "seed", -1) >= 0:
+                print(f"    [-] Representative seed: 0x{session.seed:08x}")
+            print(f"    [-] Validation: {session.key_recovery_validation}")
+            print(f"  {warning('[+]')} Decrypting Nimplant traffic using {info(backend)}")
+        else:
+            print(f"  {warning('[-]')} AES key not recovered: {session.key_recovery_validation}")
+
+        successes = [attempt for attempt in session_attempts if attempt.status == "success"]
+        artifacts = [attempt for attempt in session_attempts if attempt.status == "artifact"]
+        failures = [attempt for attempt in session_attempts if attempt.status == "failed"]
+        skipped = [attempt for attempt in session_attempts if attempt.status == "skipped"]
+
+        for attempt in successes:
+            print_nimplant_attempt(result, attempt)
+        for attempt in artifacts:
+            print_nimplant_attempt(result, attempt)
+        for attempt in failures:
+            print(
+                f"  {danger('[!]')} Failed to decrypt {attempt.direction} field "
+                f"{attempt.field_name} {attempt.src}:{attempt.sport} -> "
+                f"{attempt.dst}:{attempt.dport}: {attempt.error}"
+            )
+        if skipped:
+            print(f"  {warning('[-]')} Skipped {len(skipped)} Nimplant decrypt step(s)")
+    return True
+
+
+def nimplant_c2_address(session) -> str:
+    scheme = "https" if int(session.dport) == 443 else "http"
+    host = session.host_header or session.dst
+    uri = session.login_uri if session.login_uri.startswith("/") else f"/{session.login_uri}"
+    return f"{scheme}://{host}{uri}"
+
+
+def print_nimplant_attempt(result: AnalysisResult, attempt) -> None:
+    label = "Request data" if attempt.direction == "request" else "Response task"
+    if attempt.direction == "session":
+        label = "Session"
+    if attempt.direction == "transfer":
+        label = "Transfer artifact"
+    task = f" task={attempt.task}" if getattr(attempt, "task", "") else ""
+    guid = f" guid={attempt.task_guid}" if getattr(attempt, "task_guid", "") else ""
+    print(f"  {success('[+]')} Decrypted Nimplant {info(label)}{guid}{task}")
+    if attempt.filename:
+        print(
+            f"      {success('[-]')} Saved: "
+            f"{info(result.output_dir / attempt.filename)}"
+        )
+    if getattr(attempt, "artifact_filename", ""):
+        artifact_path = result.output_dir / "carved_artifacts" / attempt.artifact_filename
+        print(
+            f"      {danger('[!] Found artifact:')} {danger(artifact_path)} "
+            f"{warning(f'({attempt.artifact_type}, offset {attempt.artifact_offset})')}"
+        )
+    preview = getattr(attempt, "preview", "")
+    if preview:
+        if len(preview) > MAX_CONSOLE_DECRYPT_BYTES:
+            preview = (
+                preview[:MAX_CONSOLE_DECRYPT_BYTES]
+                + f"\n\n[... truncated console output at {MAX_CONSOLE_DECRYPT_BYTES} chars; "
+                "additional plaintext omitted from console output ...]"
+            )
+        print(muted("============================================== Result =============================================="))
+        print(preview)
+        print(muted("===================================================================================================="))

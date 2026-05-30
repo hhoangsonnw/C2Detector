@@ -29,13 +29,6 @@ SUSPICIOUS_USER_AGENT_TOKENS = (
     "node-fetch",
 )
 
-DEFAULT_ATTACK_MAP = [
-    "T1071.001 Web Protocols",
-    "T1105 Ingress Tool Transfer",
-    "T1041 Exfiltration Over C2 Channel",
-]
-
-
 @dataclass
 class AnalysisConfig:
     min_beacon_count: int = 4

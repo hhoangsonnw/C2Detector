@@ -52,13 +52,6 @@ COMMANDS = {
     8195: "COMMAND_ASSEMBLY_LIST_VERSIONS",
 }
 
-ATTACK_MAP = [
-    "T1071.001 Web Protocols",
-    "T1105 Ingress Tool Transfer",
-    "T1041 Exfiltration Over C2 Channel",
-    "T1573.001 Symmetric Cryptography",
-]
-
 MIN_USEFUL_DECRYPT_SIZE = 8
 MIN_PRINTABLE_DECRYPT_RATIO = 0.65
 GENERIC_CARVABLE_SIGNATURES = (
@@ -84,6 +77,36 @@ INTERESTING_TEXT_TOKENS = (
     "Documents",
     "Downloads",
 )
+ARTIFACT_INDEX_FIELDS = [
+    "plugin",
+    "timestamp",
+    "direction",
+    "src",
+    "sport",
+    "dst",
+    "dport",
+    "uri",
+    "framework_id",
+    "field_name",
+    "command_id",
+    "command_name",
+    "task_guid",
+    "task",
+    "encrypted_size",
+    "plaintext_size",
+    "payload_offset",
+    "status",
+    "backend",
+    "validation",
+    "source_sha256",
+    "artifact_type",
+    "artifact_offset",
+    "artifact_size",
+    "artifact_sha256",
+    "artifact_filename",
+    "error",
+    "preview",
+]
 
 
 @dataclass(frozen=True)
@@ -305,7 +328,6 @@ class HavocDemonInitRule(DetectionRule):
             first_seen=init.timestamp,
             last_seen=init.timestamp,
             evidence=evidence,
-            attack=ATTACK_MAP,
             suspicious_flows=[flow],
             metadata=metadata,
         )
@@ -433,10 +455,17 @@ def parse_havoc_message_header(body: bytes, magic_offset: int) -> Optional[dict[
 def decrypt_havoc_traffic(
     result: AnalysisResult, sessions: list[DemonInit]
 ) -> list[DecryptionAttempt]:
-    output_dir = result.output_dir / "havoc_decrypted"
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
+    output_dir = result.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    legacy_dir = output_dir / "havoc_decrypted"
+    if legacy_dir.exists():
+        shutil.rmtree(legacy_dir)
+    if not result.plugin_artifacts.get("artifact_output_prepared"):
+        artifact_dir = output_dir / "carved_artifacts"
+        if artifact_dir.exists():
+            shutil.rmtree(artifact_dir)
+        (output_dir / "index.csv").unlink(missing_ok=True)
+        result.plugin_artifacts["artifact_output_prepared"] = True
     attempts: list[DecryptionAttempt] = []
 
     for session in sessions:
@@ -446,6 +475,9 @@ def decrypt_havoc_traffic(
         attempts.extend(decrypt_matching_responses(result, session, key, iv, output_dir))
 
     write_decryption_index(output_dir, attempts)
+    result.plugin_artifacts["artifact_index_written"] = True
+    if any(attempt.artifact_filename for attempt in attempts):
+        result.plugin_artifacts["carved_artifacts_written"] = True
     return attempts
 
 
@@ -632,9 +664,6 @@ def decrypt_payload_to_file(
             artifact_filename=carved_artifact.filename if carved_artifact else "",
         )
 
-    filename = f"{direction}_{agent_id}_{timestamp:.6f}_{sha256[:12]}.bin"
-    path = output_dir / safe_filename(filename)
-    path.write_bytes(decrypted)
     return DecryptionAttempt(
         timestamp=timestamp,
         direction=direction,
@@ -653,7 +682,6 @@ def decrypt_payload_to_file(
         backend=backend,
         validation=validation,
         sha256=sha256,
-        filename=path.name,
         preview=preview,
         artifact_type=carved_artifact.artifact_type if carved_artifact else "",
         artifact_offset=carved_artifact.offset if carved_artifact else -1,
@@ -982,41 +1010,20 @@ def command_hint_from_plaintext(payload: bytes) -> str:
 
 def write_decryption_index(output_dir: Path, attempts: list[DecryptionAttempt]) -> None:
     path = output_dir / "index.csv"
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    write_header = not path.exists() or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=[
-                "timestamp",
-                "direction",
-                "src",
-                "sport",
-                "dst",
-                "dport",
-                "uri",
-                "agent_id",
-                "magic",
-                "command_id",
-                "command_name",
-                "payload_offset",
-                "encrypted_size",
-                "status",
-                "backend",
-                "validation",
-                "sha256",
-                "filename",
-                "preview",
-                "artifact_type",
-                "artifact_offset",
-                "artifact_size",
-                "artifact_sha256",
-                "artifact_filename",
-                "error",
-            ],
+            fieldnames=ARTIFACT_INDEX_FIELDS,
         )
-        writer.writeheader()
+        if write_header:
+            writer.writeheader()
         for attempt in attempts:
+            if not attempt.artifact_filename:
+                continue
             writer.writerow(
                 {
+                    "plugin": "havoc",
                     "timestamp": f"{attempt.timestamp:.6f}",
                     "direction": attempt.direction,
                     "src": attempt.src,
@@ -1024,18 +1031,19 @@ def write_decryption_index(output_dir: Path, attempts: list[DecryptionAttempt]) 
                     "dst": attempt.dst,
                     "dport": str(attempt.dport),
                     "uri": attempt.uri,
-                    "agent_id": attempt.agent_id,
-                    "magic": attempt.magic,
+                    "framework_id": attempt.agent_id,
+                    "field_name": "",
                     "command_id": str(attempt.command_id),
                     "command_name": attempt.command_name,
-                    "payload_offset": str(attempt.payload_offset),
+                    "task_guid": "",
+                    "task": "",
                     "encrypted_size": str(attempt.encrypted_size),
+                    "plaintext_size": "",
+                    "payload_offset": str(attempt.payload_offset),
                     "status": attempt.status,
                     "backend": attempt.backend,
                     "validation": attempt.validation,
-                    "sha256": attempt.sha256,
-                    "filename": attempt.filename,
-                    "preview": attempt.preview,
+                    "source_sha256": attempt.sha256,
                     "artifact_type": attempt.artifact_type,
                     "artifact_offset": (
                         str(attempt.artifact_offset) if attempt.artifact_offset >= 0 else ""
@@ -1044,6 +1052,7 @@ def write_decryption_index(output_dir: Path, attempts: list[DecryptionAttempt]) 
                     "artifact_sha256": attempt.artifact_sha256,
                     "artifact_filename": attempt.artifact_filename,
                     "error": attempt.error,
+                    "preview": attempt.preview,
                 }
             )
 
@@ -1063,7 +1072,7 @@ def append_havoc_decryption_report(
         "## Havoc Decryption",
         "",
         f"- Attempts: {len(attempts)}",
-        f"- Useful decrypts saved: {completed}",
+        f"- Useful decrypts: {completed}",
         f"- Filtered noise: {filtered}",
         f"- Failed: {failed}",
         f"- Skipped: {skipped}",
@@ -1071,8 +1080,10 @@ def append_havoc_decryption_report(
         f"- Backend: {', '.join(backends) if backends else 'none'}",
         f"- Request decrypt rule: drop through `magic_offset + 4 + {REQUEST_SKIP_AFTER_MAGIC}` bytes, then AES-CTR decrypt",
         f"- Response decrypt rule: drop the first `{RESPONSE_PAYLOAD_OFFSET}` bytes of the HTTP response body, then AES-CTR decrypt",
-        "- Output directory: `havoc_decrypted/`",
-        "- Index: `havoc_decrypted/index.csv`",
+        "- Output directory: report root",
+        "- Carved artifacts: `carved_artifacts/`",
+        "- Artifact index: `index.csv`",
+        "- Raw decrypted request and response bodies are parsed for context but are not written to disk",
         "",
     ]
     interesting = [

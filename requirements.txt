@@ -1,2 +1,4 @@
-
-pycryptodome
+# Portable AES-CTR backend for Havoc and Nimplant decrypts.
+# Nimplant can use a local OpenSSL libcrypto fallback when available, but
+# pycryptodome is the portable default for fresh environments.
+pycryptodome>=3.23,<4

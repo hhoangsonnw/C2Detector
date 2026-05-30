@@ -179,7 +179,6 @@ class Finding:
     first_seen: float
     last_seen: float
     evidence: list[str]
-    attack: list[str]
     suspicious_flows: list[SuspiciousFlow]
     metadata: dict[str, str] = field(default_factory=dict)
 

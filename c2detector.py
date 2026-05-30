@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""C2Detector command-line entrypoint."""
+
 from __future__ import annotations
 
 import argparse
